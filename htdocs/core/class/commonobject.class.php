@@ -5152,6 +5152,62 @@ abstract class CommonObject
 	}
 
 	/**
+	 *	Return the proposals, orders and invoices of the same thirdparty that are linked to the documents linked to this object (second level of links).
+	 *	The documents of the same type as this object are ignored, and so are the ones that the user can not read.
+	 *	The links of this object must have been loaded with fetchObjectLinked().
+	 *
+	 *	@param	User			$user	User reading the documents
+	 *	@return	array<int,Propal|Commande|Facture>	Documents
+	 *	@see	fetchObjectLinked()
+	 */
+	public function fetchIndirectObjectLinked($user)
+	{
+		$documents = array();
+		$elements = array('propal', 'commande', 'facture');
+
+		// @phan-suppress-next-line PhanUndeclaredProperty
+		$socid = (int) (isset($this->socid) ? $this->socid : (isset($this->fk_soc) ? $this->fk_soc : 0));
+		$sql = "SELECT fk_source, sourcetype, fk_target, targettype FROM ".$this->db->prefix()."element_element WHERE 1 = 0";
+		$haslinks = false;
+		foreach ($elements as $element) {
+			$linkedids = array_map('intval', $this->linkedObjectsIds[$element] ?? array());
+			if ($linkedids) {
+				$haslinks = true;
+				$sql .= " OR (sourcetype = '".$this->db->escape($element)."' AND fk_source IN (".$this->db->sanitize(implode(',', $linkedids))."))";
+				$sql .= " OR (targettype = '".$this->db->escape($element)."' AND fk_target IN (".$this->db->sanitize(implode(',', $linkedids))."))";
+			}
+		}
+		if (!$haslinks) {
+			return $documents;
+		}
+
+		$ids = array();
+		$resql = $this->db->query($sql);
+		while ($resql && $obj = $this->db->fetch_object($resql)) {
+			$ids[$obj->sourcetype][(int) $obj->fk_source] = (int) $obj->fk_source;
+			$ids[$obj->targettype][(int) $obj->fk_target] = (int) $obj->fk_target;
+		}
+
+		foreach ($elements as $element) {
+			if ($element == $this->element) {
+				continue;
+			}
+			$properties = getElementProperties($element);
+			dol_include_once('/'.$properties['classpath'].'/'.$properties['classfile'].'.class.php');
+			$classname = $properties['classname'];
+			foreach (array_diff($ids[$element] ?? array(), array_map('intval', $this->linkedObjectsIds[$element] ?? array())) as $id) {
+				$document = new $classname($this->db);
+				'@phan-var-force Propal|Commande|Facture $document';
+				if (restrictedArea($user, $element, $id, '', '', 'fk_soc', 'rowid', 0, 1) && $document->fetch($id) > 0 && $document->socid == $socid) {
+					$documents[] = $document;
+				}
+			}
+		}
+
+		return $documents;
+	}
+
+	/**
 	 *	Update object linked of a current object
 	 *
 	 *	@param	int		$sourceid		Object source id

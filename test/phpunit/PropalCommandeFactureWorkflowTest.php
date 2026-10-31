@@ -25,6 +25,7 @@
 
 global $conf,$user,$langs,$db,$mysoc;
 require_once dirname(__FILE__).'/CommonClassTest.class.php';
+require_once dirname(__FILE__).'/../../htdocs/core/class/html.form.class.php';
 require_once dirname(__FILE__).'/../../htdocs/comm/propal/class/propal.class.php';
 require_once dirname(__FILE__).'/../../htdocs/commande/class/commande.class.php';
 require_once dirname(__FILE__).'/../../htdocs/compta/facture/class/facture.class.php';
@@ -337,5 +338,159 @@ class PropalCommandeFactureWorkflowTest extends CommonClassTest
 		$propal->delete($user);
 		$product->delete($user);
 		$soc->delete($socid, $user);
+	}
+
+	/**
+	 * testIndirectObjectLinked
+	 *
+	 * The proposals, orders and invoices of the same thirdparty linked to the documents linked to a document are listed
+	 * in the box of linked objects, only if the option is on.
+	 *
+	 * @return void
+	 */
+	public function testIndirectObjectLinked()
+	{
+		global $conf,$user,$langs,$db;
+		$conf = $this->savconf;
+		$user = $this->savuser;
+		$langs = $this->savlangs;
+		$db = $this->savdb;
+
+		$soc = new Societe($db);
+		$soc->name = 'PropalCommandeFactureWorkflowTest indirect links Unittest';
+		$socid = $soc->create($user);
+		$this->assertGreaterThan(0, $socid, $soc->errorsToString());
+		$soc2 = new Societe($db);
+		$soc2->name = 'PropalCommandeFactureWorkflowTest indirect links other Unittest';
+		$socid2 = $soc2->create($user);
+		$this->assertGreaterThan(0, $socid2, $soc2->errorsToString());
+
+		// An order and an invoice created from the proposal, and an invoice created from the order
+		$propal = $this->createDraftFrom(new Propal($db), $socid, array());
+		$order = $this->createDraftFrom(new Commande($db), $socid, array('propal' => $propal->id));
+		$invoiceA = $this->createDraftFrom(new Facture($db), $socid, array('propal' => $propal->id));
+		$invoiceB = $this->createDraftFrom(new Facture($db), $socid, array('commande' => $order->id));
+
+		$this->assertEquals(array('facture'.$invoiceA->id), $this->getIndirectIds($order), 'The order finds the invoice created from its proposal');
+		$this->assertEquals(array('commande'.$order->id), $this->getIndirectIds($invoiceA), 'The invoice of the proposal finds the order, not the other invoice');
+		$this->assertEquals(array('propal'.$propal->id), $this->getIndirectIds($invoiceB), 'The invoice of the order finds the proposal, not the other invoice');
+		$this->assertEquals(array('facture'.$invoiceB->id), $this->getIndirectIds($propal), 'The proposal finds the invoice of its order');
+
+		// A document of another thirdparty linked to the proposal is ignored
+		$invoiceC = $this->createDraftFrom(new Facture($db), $socid2, array('propal' => $propal->id));
+		$this->assertEquals(array('facture'.$invoiceA->id), $this->getIndirectIds($order), 'A document of another thirdparty is ignored');
+
+		// The documents that the user can not read are ignored
+		$limiteduser = new User($db);
+		$limiteduser->rights = new stdClass();
+		$limiteduser->rights->propal = (object) array('lire' => 1);
+		$limiteduser->rights->societe = (object) array('client' => (object) array('voir' => 1));
+		$this->assertEquals(array(), $this->getIndirectIds($order, $limiteduser), 'The invoice is not listed for a user who can not read invoices');
+		$this->assertEquals(array('propal'.$propal->id), $this->getIndirectIds($invoiceB, $limiteduser), 'The proposal is listed for a user who can read proposals');
+		$this->assertEquals(array(), $this->getIndirectIds($order, new User($db)), 'Nothing for a user without rights');
+
+		// A document without thirdparty lists nothing
+		$order->socid = 0;
+		$this->assertEquals(array(), $this->getIndirectIds($order), 'A document without thirdparty lists nothing');
+		$order->socid = $socid;
+
+		// The box of linked objects lists them with the option only, without link to remove them
+		$optionbefore = getDolGlobalString('MAIN_SHOW_INDIRECT_LINKED_OBJECTS');
+		$langs->loadLangs(array('main', 'bills'));
+		$this->assertNotEquals('OtherRelatedObjects', $langs->trans('OtherRelatedObjects'), 'The title of the list must be translated');
+		$db->query("UPDATE ".MAIN_DB_PREFIX."facture SET fk_statut = 1 WHERE rowid = ".((int) $invoiceA->id));
+		foreach (array(0, 1) as $optionvalue) {
+			$conf->global->MAIN_SHOW_INDIRECT_LINKED_OBJECTS = $optionvalue;
+			$html = $this->getLinkedObjectBlock($order);
+			$this->assertEquals(2, substr_count($html, 'dellinkid'), 'Only the 2 documents linked to the order can be unlinked');
+			if ($optionvalue) {
+				$this->assertStringContainsString($langs->trans('OtherRelatedObjects'), $html);
+				$this->assertStringContainsString($invoiceA->ref, $html, 'The invoice of the proposal is listed with the option');
+			} else {
+				$this->assertStringNotContainsString($langs->trans('OtherRelatedObjects'), $html);
+				$this->assertStringNotContainsString($invoiceA->ref, $html, 'Nothing more without the option');
+			}
+		}
+
+		// The status of the invoice counts its payments: not paid, then started
+		$this->assertStringContainsString($langs->trans('BillStatusNotPaid'), $html);
+		$this->assertStringNotContainsString($langs->trans('BillStatusStarted'), $html);
+		$conf->global->MAIN_SHOW_INDIRECT_LINKED_OBJECTS = 1;
+		$db->query("INSERT INTO ".MAIN_DB_PREFIX."paiement_facture (fk_facture, amount) VALUES (".((int) $invoiceA->id).", 10)");
+		$html = $this->getLinkedObjectBlock($order);
+		$this->assertStringContainsString($langs->trans('BillStatusStarted'), $html);
+		$this->assertStringNotContainsString($langs->trans('BillStatusNotPaid'), $html);
+
+		$conf->global->MAIN_SHOW_INDIRECT_LINKED_OBJECTS = $optionbefore;
+		$db->query("DELETE FROM ".MAIN_DB_PREFIX."paiement_facture WHERE fk_facture = ".((int) $invoiceA->id));
+		$db->query("UPDATE ".MAIN_DB_PREFIX."facture SET fk_statut = 0 WHERE rowid = ".((int) $invoiceA->id));
+
+		foreach (array($invoiceC, $invoiceB, $invoiceA, $order, $propal) as $document) {
+			$document->delete($user);
+		}
+		$soc2->delete($socid2, $user);
+		$soc->delete($socid, $user);
+	}
+
+	/**
+	 * Create a draft document of a thirdparty, with the links given at its creation
+	 *
+	 * @param	Propal|Commande|Facture	$document		Document to create
+	 * @param	int						$socid			Id of the thirdparty
+	 * @param	array<string,int>		$linkedobjects	Documents it is created from ('propal' => id, ...)
+	 * @return	Propal|Commande|Facture					Document created
+	 */
+	private function createDraftFrom($document, $socid, $linkedobjects)
+	{
+		global $user;
+
+		$document->initAsSpecimen();
+		$document->ref = '';
+		$document->lines = array();
+		$document->socid = $socid;
+		$document->linked_objects = $linkedobjects;
+		$this->assertGreaterThan(0, $document->create($user), $document->errorsToString());
+
+		return $document;
+	}
+
+	/**
+	 * Return the html of the box of linked objects of a document
+	 *
+	 * @param	Propal|Commande|Facture	$document	Document
+	 * @return	string									Html
+	 */
+	private function getLinkedObjectBlock($document)
+	{
+		global $db;
+
+		$document->clearObjectLinkedCache();
+		$form = new Form($db);
+		ob_start();
+		$form->showLinkedObjectBlock($document);
+
+		return ob_get_clean();
+	}
+
+	/**
+	 * Return the sorted element and id of the documents listed by fetchIndirectObjectLinked()
+	 *
+	 * @param	Propal|Commande|Facture	$document	Document
+	 * @param	?User					$reader		User reading the documents (default is the current user)
+	 * @return	string[]							For example array('facture12', 'propal3')
+	 */
+	private function getIndirectIds($document, $reader = null)
+	{
+		global $user;
+
+		$document->clearObjectLinkedCache();
+		$document->fetchObjectLinked();
+		$ids = array();
+		foreach ($document->fetchIndirectObjectLinked($reader ? $reader : $user) as $linked) {
+			$ids[] = $linked->element.$linked->id;
+		}
+		sort($ids);
+
+		return $ids;
 	}
 }

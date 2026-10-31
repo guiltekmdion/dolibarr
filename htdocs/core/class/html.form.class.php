@@ -11619,6 +11619,27 @@ class Form
 				print '<tr><td colspan="7"><span class="opacitymedium">' . $langs->trans("None") . '</span></td></tr>';
 			}
 
+			if (getDolGlobalString('MAIN_SHOW_INDIRECT_LINKED_OBJECTS')) {
+				$indirectobjects = $object->fetchIndirectObjectLinked($user);
+				$indirectobjects = dol_sort_array($indirectobjects, 'date,ref', 'desc', 0, 0, 1);
+				if ($indirectobjects) {
+					$langs->loadLangs(array('propal', 'orders', 'bills'));
+					print '<tr class="liste_titre"><td colspan="7">' . $langs->trans("OtherRelatedObjects") . '</td></tr>';
+					foreach ($indirectobjects as $objectlink) {
+						$status = ($objectlink instanceof Facture ? $objectlink->getLibStatut(3, $objectlink->getSommePaiement() + $objectlink->getSumDepositsUsed() + $objectlink->getSumCreditNotesUsed()) : $objectlink->getLibStatut(3));
+						print '<tr class="oddeven">';
+						print '<td class="linkedcol-element tdoverflowmax100">' . $langs->trans(array('propal' => 'Proposal', 'commande' => 'CustomerOrder', 'facture' => 'CustomerInvoice')[$objectlink->element]) . '</td>';
+						print '<td class="linkedcol-name tdoverflowmax150">' . $objectlink->getNomUrl(1) . '</td>';
+						print '<td></td>';
+						print '<td class="linkedcol-date center">' . dol_print_date($objectlink->date, 'day') . '</td>';
+						print '<td class="linkedcol-amount right">' . price($objectlink->total_ht) . '</td>';
+						print '<td class="linkedcol-statut right">' . $status . '</td>';
+						print '<td></td>';
+						print '</tr>';
+					}
+				}
+			}
+
 			print '</table>';
 
 			if (!empty($compatibleImportElementsList)) {
